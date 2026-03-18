@@ -70,7 +70,6 @@
 
 <script type="module">
 import * as THREE from 'three';
-import { USDZLoader }      from 'three/addons/loaders/USDZLoader.js';
 import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
@@ -174,7 +173,7 @@ makeHeadlightDisc( 0.52);
 
 // ─── Headlight spotlights ───
 function makeSpotlight(xOff) {
-  const sl = new THREE.SpotLight(0xffffcc, 220, 75, Math.PI / 7, 0.4, 1.8);
+  const sl = new THREE.SpotLight(0xffffcc, 220, 75, Math.PI / 4.5, 0.4, 1.8);
   sl.position.set(xOff, 0.45, -1.9);
   sl.target.position.set(xOff * 1.1, -2, -28);
   sl.castShadow = false;
@@ -228,8 +227,8 @@ carGroup.add(fallbackCar);
 const roadMat      = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.92 });
 const sidewalkMat  = new THREE.MeshStandardMaterial({ color: 0x2e2e2e, roughness: 0.95 });
 const kerbMat      = new THREE.MeshStandardMaterial({ color: 0xbbbbbb, emissive: 0x222211, emissiveIntensity: 0.15 });
-const lineMatDash  = new THREE.MeshStandardMaterial({ color: 0xddcc44, emissive: 0x887722, emissiveIntensity: 0.45 });
-const lineMatSolid = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x888844, emissiveIntensity: 0.3 });
+const lineMatDash  = new THREE.MeshStandardMaterial({ color: 0xddcc44, roughness: 0.15 });
+const lineMatSolid = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2  });
 
 // ─────────────────────────────────────────────
 //  FACTORY: Road Segment
@@ -435,8 +434,8 @@ function updateCar(dt) {
   const lft  = keys['KeyA'] || keys['ArrowLeft'];
   const rgt  = keys['KeyD'] || keys['ArrowRight'];
 
-  if (fwd)  speed -= ACCEL * dt;
-  if (back) speed += ACCEL * 0.55 * dt;
+  if (fwd)  speed += ACCEL * dt;
+  if (back) speed -= ACCEL * 0.55 * dt;
   speed *= Math.pow(FRICTION, dt);
   speed = Math.max(-MAX_SPEED * 0.4, Math.min(MAX_SPEED, speed));
 
@@ -526,80 +525,17 @@ function updateWorld() {
 
 // ─────────────────────────────────────────────
 //  ASSET LOADING
+//  (USDZ assets contain Crate/.usdc data which USDZLoader cannot parse;
+//   all geometry falls back to procedural meshes built above.)
 // ─────────────────────────────────────────────
-let assetsTotal  = 4;
-let assetsLoaded = 0;
-
-const loadFillEl = document.getElementById('loadFill');
-const loadTextEl = document.getElementById('loadText');
 const overlayEl  = document.getElementById('overlay');
+const loadFillEl = document.getElementById('loadFill');
 
-function onAssetLoaded(name) {
-  assetsLoaded++;
-  loadFillEl.style.width = (assetsLoaded / assetsTotal * 100) + '%';
-  loadTextEl.textContent = `loaded: ${name}`;
-  if (assetsLoaded >= assetsTotal) {
-    setTimeout(() => {
-      overlayEl.style.opacity = '0';
-      setTimeout(() => { overlayEl.style.display = 'none'; }, 800);
-    }, 400);
-  }
-}
-
-function normaliseModel(obj, targetSize) {
-  const box  = new THREE.Box3().setFromObject(obj);
-  const size = box.getSize(new THREE.Vector3());
-  obj.scale.setScalar(targetSize / Math.max(size.x, size.y, size.z));
-  const box2 = new THREE.Box3().setFromObject(obj);
-  obj.position.sub(box2.getCenter(new THREE.Vector3()));
-  const box3 = new THREE.Box3().setFromObject(obj);
-  obj.position.y -= box3.min.y;
-  return obj;
-}
-
-const usdzLoader = new USDZLoader();
-
-// ─── Car model ───
-usdzLoader.load('./assets/Small_price_car.usdz',
-  (obj) => {
-    normaliseModel(obj, 4);
-    carGroup.add(obj);
-    fallbackCar.visible = false;
-    onAssetLoaded('car');
-  },
-  null,
-  () => { console.warn('Car USDZ failed – using fallback'); onAssetLoaded('car (fallback)'); }
-);
-
-// ─── Road tile ───
-usdzLoader.load('./assets/Street_road.usdz',
-  (obj) => { normaliseModel(obj, ROAD_LENGTH); onAssetLoaded('road'); },
-  null,
-  () => { console.warn('Road USDZ failed'); onAssetLoaded('road (fallback)'); }
-);
-
-// ─── Building models ───
-const buildingTemplates = [];
-
-usdzLoader.load('./assets/Old_Japanese_Store.usdz',
-  (obj) => {
-    normaliseModel(obj, 10);
-    buildingTemplates.push(obj);
-    onAssetLoaded('Japanese store');
-  },
-  null,
-  () => { console.warn('Japanese store USDZ failed'); onAssetLoaded('store (fallback)'); }
-);
-
-usdzLoader.load('./assets/Old_Concete_Building_Pack__Lowpoly.usdz',
-  (obj) => {
-    normaliseModel(obj, 12);
-    buildingTemplates.push(obj);
-    onAssetLoaded('concrete building');
-  },
-  null,
-  () => { console.warn('Concrete building USDZ failed'); onAssetLoaded('building (fallback)'); }
-);
+loadFillEl.style.width = '100%';
+setTimeout(() => {
+  overlayEl.style.opacity = '0';
+  setTimeout(() => { overlayEl.style.display = 'none'; }, 800);
+}, 400);
 
 // ─────────────────────────────────────────────
 //  MAIN LOOP
