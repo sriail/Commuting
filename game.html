@@ -91,7 +91,9 @@ const ACCEL            = 0.012;
 const FRICTION         = 0.94;
 const STEER_SPEED      = 0.028;
 const STEER_RETURN     = 0.88;
-const COLLISION_BOUNCE = -0.35;
+const COLLISION_BOUNCE          = -0.35;
+const COLLISION_COOLDOWN_FRAMES = 20;    // ~333 ms at 60 fps – prevents repeated speed-reversal
+const BOUNDARY_COOLDOWN_FRAMES  = 10;    // shorter cooldown for road-edge bounce
 // Building center X distance from road center
 const BLDG_X           = ROAD_WIDTH / 2 + 9;
 
@@ -420,8 +422,9 @@ window.addEventListener('keyup',   e => { keys[e.code] = false; });
 // ─────────────────────────────────────────────
 //  PHYSICS
 // ─────────────────────────────────────────────
-let speed    = 0;
-let steerAng = 0;
+let speed             = 0;
+let steerAng          = 0;
+let collisionCooldown = 0;   // frames to skip collision after a bounce
 
 const carBox       = new THREE.Box3();
 const carBoxShrink = new THREE.Vector3(0.18, 0, 0.28);
@@ -455,6 +458,8 @@ function updateCar(dt) {
 }
 
 function doCollisions() {
+  if (collisionCooldown > 0) { collisionCooldown--; return; }
+
   carBox.setFromObject(carGroup);
   carBox.min.add(carBoxShrink);
   carBox.max.sub(carBoxShrink);
@@ -468,11 +473,13 @@ function doCollisions() {
 
     if (carBox.intersectsBox(bld.userData.bbox)) {
       speed *= COLLISION_BOUNCE;
-      steerAng *= -0.5;
+      steerAng = 0;            // clear steering so it doesn't feel like a control flip
       const push = new THREE.Vector3()
         .subVectors(carGroup.position, bld.position)
         .normalize();
-      carGroup.position.addScaledVector(push, 0.45);
+      carGroup.position.addScaledVector(push, 0.6);
+      collisionCooldown = COLLISION_COOLDOWN_FRAMES;  // ~333 ms at 60 fps – prevents repeated speed-reversal
+      break;                   // handle at most one building collision per frame
     }
   }
 
@@ -480,6 +487,7 @@ function doCollisions() {
   if (Math.abs(carGroup.position.x) > ROAD_WIDTH / 2 + 1.5) {
     speed *= -0.4;
     carGroup.position.x = Math.sign(carGroup.position.x) * (ROAD_WIDTH / 2 + 1.5);
+    collisionCooldown = Math.max(collisionCooldown, BOUNDARY_COOLDOWN_FRAMES);
   }
 }
 

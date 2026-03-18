@@ -1,0 +1,11 @@
+{
+  "name": "night-drive",
+  "version": "1.0.0",
+  "description": "Night Drive – browser-based 3D driving game",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
