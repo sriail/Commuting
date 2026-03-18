@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Night Drive</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #111; overflow: hidden; font-family: 'Courier New', monospace; }
+    canvas { display: block; }
+
+    #overlay {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: #0a0a0a;
+      z-index: 100;
+      transition: opacity 0.8s ease;
+    }
+    #overlay h1 {
+      font-size: clamp(2rem, 6vw, 5rem);
+      letter-spacing: 0.3em;
+      color: #fff;
+      text-transform: uppercase;
+      margin-bottom: 0.3em;
+    }
+    #overlay p {
+      color: #666;
+      letter-spacing: 0.15em;
+      font-size: 0.85rem;
+      margin-bottom: 2.5em;
+    }
+    #loadBar {
+      width: min(400px, 80vw);
+      height: 2px;
+      background: #222;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    #loadFill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #ff6b00, #ffcc00);
+      transition: width 0.3s ease;
+    }
+    #loadText {
+      margin-top: 1em;
+      color: #444;
+      font-size: 0.7rem;
+      letter-spacing: 0.2em;
+    }
+
+    #hud {
+      position: fixed; bottom: 2rem; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 3rem; align-items: flex-end;
+      pointer-events: none; opacity: 0;
+      transition: opacity 1s ease;
+    }
+    #hud.visible { opacity: 1; }
+    .hud-item { text-align: center; }
+    .hud-label { color: #444; font-size: 0.6rem; letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 0.3em; }
+    .hud-value { color: #fff; font-size: 1.4rem; letter-spacing: 0.05em; }
+    #speedBar {
+      width: 120px; height: 2px; background: #222; border-radius: 1px;
+      margin-top: 0.5em; overflow: hidden;
+    }
+    #speedFill { height: 100%; width: 0%; background: #ff6b00; border-radius: 1px; transition: width 0.05s; }
+
+    #controls-hint {
+      position: fixed; top: 1.5rem; right: 1.5rem;
+      color: #333; font-size: 0.65rem; letter-spacing: 0.15em;
+      text-align: right; line-height: 1.8;
+      pointer-events: none;
+    }
+
+    #collision-flash {
+      position: fixed; inset: 0;
+      background: rgba(255, 80, 0, 0.15);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
+  </style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>NIGHT DRIVE</h1>
+  <p>loading assets</p>
+  <div id="loadBar"><div id="loadFill"></div></div>
+  <div id="loadText">initializing engine...</div>
+</div>
+
+<div id="hud">
+  <div class="hud-item">
+    <div class="hud-label">speed</div>
+    <div class="hud-value" id="speedNum">0</div>
+    <div id="speedBar"><div id="speedFill"></div></div>
+  </div>
+  <div class="hud-item">
+    <div class="hud-label">distance</div>
+    <div class="hud-value" id="distNum">0</div>
+  </div>
+</div>
+
+<div id="controls-hint">
+  W / A / S / D — DRIVE<br>
+  MOUSE — LOOK
+</div>
+
+<div id="collision-flash"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { USDZLoader }      from 'three/addons/loaders/USDZLoader.js';
+import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
+
+// ─────────────────────────────────────────────
+//  CONSTANTS
+// ─────────────────────────────────────────────
+const ROAD_WIDTH      = 14;
+const ROAD_LENGTH     = 50;
+const ROAD_POOL       = 14;
+const BUILDING_POOL   = 30;
+const SPAWN_DIST      = ROAD_LENGTH * 4;
+const DESPAWN_DIST    = ROAD_LENGTH * 2.5;
+const FOG_COLOR       = 0x1a1a22;
+const MAX_SPEED       = 0.55;
+const ACCEL           = 0.012;
+const FRICTION        = 0.94;
+const STEER_SPEED     = 0.028;
+const STEER_RETURN    = 0.88;
+const COLLISION_BOUNCE = -0.35;
+
+// ─────────────────────────────────────────────
+//  SCENE
+// ─────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(FOG_COLOR);
+scene.fog = new THREE.FogExp2(FOG_COLOR, 0.028);
+
+// ─────────────────────────────────────────────
+//  CAMERA
+// ─────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(68, innerWidth / innerHeight, 0.1, 400);
+camera.position.set(0, 3.5, 10);
+
+// ─────────────────────────────────────────────
+//  RENDERER
+// ─────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+// ─────────────────────────────────────────────
+//  POST-PROCESSING
+// ─────────────────────────────────────────────
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth, innerHeight),
+  1.2,   // strength
+  0.5,   // radius
+  0.75   // threshold
+);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+// ─────────────────────────────────────────────
+//  LIGHTING
+// ─────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x203050, 0.6));
+
+const moonLight = new THREE.DirectionalLight(0x7090b0, 0.4);
+moonLight.position.set(-20, 40, 10);
+moonLight.castShadow = true;
+moonLight.shadow.mapSize.set(1024, 1024);
+moonLight.shadow.camera.far = 200;
+moonLight.shadow.camera.left = moonLight.shadow.camera.bottom = -60;
+moonLight.shadow.camera.right = moonLight.shadow.camera.top = 60;
+scene.add(moonLight);
+
+// ─────────────────────────────────────────────
+//  CAR GROUP
+// ─────────────────────────────────────────────
+const carGroup = new THREE.Group();
+scene.add(carGroup);
+
+// Headlight cones (bloom source — emissive planes)
+function makeHeadlightCone(xOff) {
+  // Lens flare emissive disc
+  const discGeo = new THREE.CircleGeometry(0.18, 12);
+  const discMat = new THREE.MeshStandardMaterial({
+    color: 0xffffee, emissive: 0xffffc0, emissiveIntensity: 6,
+    transparent: true, opacity: 0.9, depthWrite: false
+  });
+  const disc = new THREE.Mesh(discGeo, discMat);
+  disc.rotation.y = Math.PI;
+  disc.position.set(xOff, 0.42, -2.02);
+  carGroup.add(disc);
+  return disc;
+}
+makeHeadlightCone(-0.52);
+makeHeadlightCone( 0.52);
+
+// Spot lights
+function makeSpotlight(xOff) {
+  const sl = new THREE.SpotLight(0xffffcc, 180, 90, Math.PI / 7, 0.35, 1.8);
+  sl.position.set(xOff, 0.45, -1.9);
+  sl.target.position.set(xOff * 1.1, -2, -25);
+  sl.castShadow = false; // keep cost low
+  carGroup.add(sl);
+  carGroup.add(sl.target);
+  return sl;
+}
+makeSpotlight(-0.52);
+makeSpotlight( 0.52);
+
+// Soft glow point lights near headlights
+const glowPt = new THREE.PointLight(0xffdd88, 12, 10, 2);
+glowPt.position.set(0, 0.4, -2.2);
+carGroup.add(glowPt);
+
+// Tail-light glow
+const tailGlow = new THREE.PointLight(0xff2200, 4, 5, 2);
+tailGlow.position.set(0, 0.4, 2.2);
+carGroup.add(tailGlow);
+
+// Tail-light emissive discs
+function makeTailLight(xOff) {
+  const geo = new THREE.CircleGeometry(0.12, 8);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xff1100, emissive: 0xff1100, emissiveIntensity: 5,
+    transparent: true, opacity: 0.9, depthWrite: false
+  });
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(xOff, 0.42, 2.02);
+  carGroup.add(m);
+}
+makeTailLight(-0.45);
+makeTailLight( 0.45);
+
+// Fallback car body (shown before model loads or on error)
+const fallbackCar = (() => {
+  const g = new THREE.Group();
+  const bodyGeo = new THREE.BoxGeometry(1.8, 0.65, 4.0);
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1a2a6c, roughness: 0.4, metalness: 0.6 });
+  const body = new THREE.Mesh(bodyGeo, bodyMat); body.position.y = 0.55;
+  const cabGeo = new THREE.BoxGeometry(1.5, 0.55, 2.0);
+  const cabMat = new THREE.MeshStandardMaterial({ color: 0x0f1a4a, roughness: 0.3, metalness: 0.5 });
+  const cab = new THREE.Mesh(cabGeo, cabMat); cab.position.set(0, 1.1, -0.2);
+  [body, cab].forEach(m => { m.castShadow = true; g.add(m); });
+  return g;
+})();
+carGroup.add(fallbackCar);
+
+// ─────────────────────────────────────────────
+//  ROAD MATERIALS (shared, reused)
+// ─────────────────────────────────────────────
+const roadMat = new THREE.MeshStandardMaterial({
+  color: 0x1c1c1c, roughness: 0.92, metalness: 0.0
+});
+const lineMatSolid = new THREE.MeshStandardMaterial({
+  color: 0xffffff, emissive: 0x888844, emissiveIntensity: 0.3,
+  roughness: 0.5
+});
+const lineMatDash = new THREE.MeshStandardMaterial({
+  color: 0xddcc44, emissive: 0x887722, emissiveIntensity: 0.4,
+  roughness: 0.5
+});
+const sidewalkMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.95 });
+const kerbMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, emissive: 0x333322, emissiveIntensity: 0.15 });
+
+// ─────────────────────────────────────────────
+//  FACTORY: Road Segment
+// ─────────────────────────────────────────────
+function buildRoadSegment() {
+  const root = new THREE.Group();
+
+  // Asphalt
+  const asphalt = new THREE.Mesh(new THREE.PlaneGeometry(ROAD_WIDTH, ROAD_LENGTH), roadMat);
+  asphalt.rotation.x = -Math.PI / 2;
+  asphalt.receiveShadow = true;
+  root.add(asphalt);
+
+  // Sidewalks
+  const swGeo = new THREE.BoxGeometry(4, 0.12, ROAD_LENGTH);
+  for (const side of [-1, 1]) {
+    const sw = new THREE.Mesh(swGeo, sidewalkMat);
+    sw.position.set(side * (ROAD_WIDTH / 2 + 2), 0.06, 0);
+    sw.receiveShadow = true;
+    root.add(sw);
+  }
+
+  // Kerb strips
+  const kerbGeo = new THREE.BoxGeometry(0.25, 0.18, ROAD_LENGTH);
+  for (const side of [-1, 1]) {
+    const k = new THREE.Mesh(kerbGeo, kerbMat);
+    k.position.set(side * (ROAD_WIDTH / 2 + 0.125), 0.09, 0);
+    root.add(k);
+  }
+
+  // Center dashes
+  const dashCount = 10;
+  const dashLen = ROAD_LENGTH / dashCount;
+  const dashGeo = new THREE.PlaneGeometry(0.18, dashLen * 0.55);
+  for (let i = 0; i < dashCount; i++) {
+    const d = new THREE.Mesh(dashGeo, lineMatDash);
+    d.rotation.x = -Math.PI / 2;
+    d.position.set(0, 0.005, -ROAD_LENGTH / 2 + dashLen * (i + 0.5));
+    root.add(d);
+  }
+
+  // Lane markers (solid outer lines)
+  for (const x of [-ROAD_WIDTH / 4, ROAD_WIDTH / 4]) {
+    const laneGeo = new THREE.PlaneGeometry(0.1, ROAD_LENGTH);
+    const lane = new THREE.Mesh(laneGeo, lineMatSolid);
+    lane.rotation.x = -Math.PI / 2;
+    lane.position.set(x, 0.004, 0);
+    root.add(lane);
+  }
+
+  root.userData.isRoad = true;
+  root.userData.bbox   = new THREE.Box3();
+  return root;
+}
+
+// ─────────────────────────────────────────────
+//  FACTORY: Fallback Building
+// ─────────────────────────────────────────────
+const buildingPalette = [0x2a2a38, 0x1e2e1e, 0x30201a, 0x1a2030, 0x282018, 0x201820];
+const windowMatCache = {};
+
+function buildFallbackBuilding(seed) {
+  const g = new THREE.Group();
+  const rng = (n) => { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return ((seed >>> 0) % n); };
+
+  const w  = 4  + rng(6);
+  const h  = 6  + rng(16);
+  const d  = 4  + rng(6);
+  const ci = rng(buildingPalette.length);
+
+  const bodyGeo = new THREE.BoxGeometry(w, h, d);
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: buildingPalette[ci], roughness: 0.85, metalness: 0.05
+  });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.position.y = h / 2;
+  body.castShadow = true;
+  body.receiveShadow = true;
+  g.add(body);
+
+  // Emissive window grid
+  const rows = Math.floor(h / 2) - 1;
+  const cols = Math.floor(w / 1.5);
+  const ww = 0.4, wh = 0.5;
+  const winGeo = new THREE.PlaneGeometry(ww, wh);
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (rng(3) === 0) continue; // some dark
+      const warm = rng(2) === 0;
+      const key = warm ? 'warm' : 'cool';
+      if (!windowMatCache[key]) {
+        windowMatCache[key] = new THREE.MeshStandardMaterial({
+          color: warm ? 0xffdd99 : 0x88bbff,
+          emissive: warm ? 0xffaa44 : 0x4488cc,
+          emissiveIntensity: rng(4) === 0 ? 0 : (0.8 + rng(10) * 0.1),
+          transparent: true, opacity: 0.9, depthWrite: false
+        });
+      }
+      const win = new THREE.Mesh(winGeo, windowMatCache[key]);
+      win.position.set(
+        -w / 2 + (c + 0.8) * (w / cols),
+        1.2 + r * 1.8,
+        d / 2 + 0.01
+      );
+      g.add(win);
+    }
+  }
+
+  // Rooftop detail
+  if (rng(2) === 0) {
+    const rtGeo = new THREE.BoxGeometry(w * 0.4, 1.5 + rng(3), d * 0.4);
+    const rt = new THREE.Mesh(rtGeo, bodyMat);
+    rt.position.y = h + 0.75 + rng(2) * 0.5;
+    rt.castShadow = true;
+    g.add(rt);
+  }
+
+  g.userData.halfW = w / 2;
+  g.userData.halfD = d / 2;
+  return g;
+}
+
+// ─────────────────────────────────────────────
+//  POOLS
+// ─────────────────────────────────────────────
+const roadPool     = Array.from({ length: ROAD_POOL },     () => { const r = buildRoadSegment();    r.visible = false; scene.add(r); return r; });
+const buildingPool = Array.from({ length: BUILDING_POOL }, (_, i) => { const b = buildFallbackBuilding(i * 7 + 13); b.visible = false; scene.add(b); return b; });
+
+const activeRoads     = [];
+const activeBuildings = [];
+
+// ─────────────────────────────────────────────
+//  SPAWN STATE
+// ─────────────────────────────────────────────
+let frontZ = 0;   // furthest spawned road centre Z
+let totalDist = 0;
+
+function getFromPool(pool) {
+  return pool.find(o => !o.visible) || null;
+}
+
+function spawnRoad(z) {
+  const seg = getFromPool(roadPool);
+  if (!seg) return;
+  seg.position.set(0, 0, z);
+  seg.visible = true;
+  activeRoads.push(seg);
+}
+
+const BLDG_SIDE = ROAD_WIDTH / 2 + 5;
+
+function spawnBuildings(z) {
+  for (const side of [-1, 1]) {
+    const bld = getFromPool(buildingPool);
+    if (!bld) continue;
+    const xOff = side * (BLDG_SIDE + Math.random() * 6);
+    bld.position.set(xOff, 0, z + (Math.random() - 0.5) * ROAD_LENGTH * 0.6);
+    bld.rotation.y = Math.random() < 0.3 ? Math.PI / 2 : (Math.random() - 0.5) * 0.15;
+    bld.visible = true;
+    // recompute bbox once placed
+    bld.userData.bbox = new THREE.Box3().setFromObject(bld);
+    activeBuildings.push(bld);
+  }
+}
+
+function seedWorld() {
+  for (let i = 0; i < 8; i++) {
+    spawnRoad(frontZ);
+    spawnBuildings(frontZ);
+    frontZ -= ROAD_LENGTH;
+  }
+}
+
+// ─────────────────────────────────────────────
+//  PHYSICS / INPUT
+// ─────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true; e.preventDefault(); });
+window.addEventListener('keyup',   e => { keys[e.code] = false; });
+
+let speed     = 0;
+let steerAng  = 0;
+const carVelocity = new THREE.Vector3();
+
+// Bounding box for car (rebuilt each frame)
+const carBox = new THREE.Box3();
+// Slightly shrink car box so minor clipping doesn't register
+const carBoxShrink = new THREE.Vector3(0.15, 0, 0.25);
+
+let collisionFlashTimer = 0;
+
+function updateCar(dt) {
+  const fwd  = keys['KeyW'] || keys['ArrowUp'];
+  const back = keys['KeyS'] || keys['ArrowDown'];
+  const lft  = keys['KeyA'] || keys['ArrowLeft'];
+  const rgt  = keys['KeyD'] || keys['ArrowRight'];
+
+  if (fwd)  speed -= ACCEL * dt;
+  if (back) speed += ACCEL * 0.55 * dt;
+  speed *= Math.pow(FRICTION, dt);
+  speed = Math.max(-MAX_SPEED * 0.4, Math.min(MAX_SPEED, speed));
+
+  const speedFraction = Math.abs(speed) / MAX_SPEED;
+  const steerMax = STEER_SPEED * speedFraction;
+  if (lft) steerAng += steerMax * dt;
+  if (rgt) steerAng -= steerMax * dt;
+  steerAng *= Math.pow(STEER_RETURN, dt);
+
+  if (Math.abs(speed) > 0.002) {
+    carGroup.rotation.y += steerAng * dt;
+  }
+
+  // Move in local forward direction
+  const dir = new THREE.Vector3(0, 0, -1).applyEuler(carGroup.rotation);
+  carGroup.position.addScaledVector(dir, speed * dt);
+  carGroup.position.y = 0;
+
+  totalDist += Math.abs(speed) * dt;
+}
+
+function doCollisions() {
+  // Rebuild car AABB from actual car mesh
+  if (fallbackCar.visible) {
+    carBox.setFromObject(carGroup);
+  } else {
+    carBox.setFromObject(carGroup);
+  }
+  carBox.min.add(carBoxShrink);
+  carBox.max.sub(carBoxShrink);
+
+  for (const bld of activeBuildings) {
+    if (!bld.visible) continue;
+    if (!bld.userData.bbox) continue;
+
+    // Quick early-out distance check
+    const dx = bld.position.x - carGroup.position.x;
+    const dz = bld.position.z - carGroup.position.z;
+    if (dx * dx + dz * dz > 400) continue;
+
+    if (carBox.intersectsBox(bld.userData.bbox)) {
+      speed *= COLLISION_BOUNCE;
+      steerAng *= -0.5;
+      collisionFlashTimer = 8;
+
+      // Push car away from building center
+      const push = new THREE.Vector3().subVectors(carGroup.position, bld.position).normalize();
+      carGroup.position.addScaledVector(push, 0.4);
+    }
+  }
+
+  // Road boundary – keep car on asphalt
+  if (Math.abs(carGroup.position.x) > ROAD_WIDTH / 2 + 1.5) {
+    speed *= -0.4;
+    carGroup.position.x = Math.sign(carGroup.position.x) * (ROAD_WIDTH / 2 + 1.5);
+  }
+}
+
+// ─────────────────────────────────────────────
+//  WORLD STREAMING
+// ─────────────────────────────────────────────
+function updateWorld() {
+  const cz = carGroup.position.z;
+
+  // Spawn ahead
+  while (frontZ > cz - SPAWN_DIST) {
+    spawnRoad(frontZ);
+    spawnBuildings(frontZ);
+    frontZ -= ROAD_LENGTH;
+  }
+
+  // Recycle behind
+  for (let i = activeRoads.length - 1; i >= 0; i--) {
+    if (activeRoads[i].position.z > cz + DESPAWN_DIST) {
+      activeRoads[i].visible = false;
+      activeRoads.splice(i, 1);
+    }
+  }
+  for (let i = activeBuildings.length - 1; i >= 0; i--) {
+    const b = activeBuildings[i];
+    if (b.position.z > cz + DESPAWN_DIST) {
+      b.visible = false;
+      activeBuildings.splice(i, 1);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+//  CAMERA
+// ─────────────────────────────────────────────
+const camTarget  = new THREE.Vector3();
+const camCurrent = new THREE.Vector3();
+const camLookAt  = new THREE.Vector3();
+const camOffset  = new THREE.Vector3(0, 3.8, 9.5);
+
+function updateCamera(dt) {
+  // Camera leans slightly into turns
+  const lean = steerAng * 30;
+  const offset = camOffset.clone().applyEuler(new THREE.Euler(0, carGroup.rotation.y, 0));
+  camTarget.copy(carGroup.position).add(offset);
+  camCurrent.lerp(camTarget, 0.1 * dt);
+  camera.position.copy(camCurrent);
+
+  camLookAt.copy(carGroup.position).add(new THREE.Vector3(0, 0.8, 0));
+  camera.lookAt(camLookAt);
+  camera.rotation.z = lean * 0.015;
+}
+
+// ─────────────────────────────────────────────
+//  HUD
+// ─────────────────────────────────────────────
+const speedNumEl  = document.getElementById('speedNum');
+const distNumEl   = document.getElementById('distNum');
+const speedFillEl = document.getElementById('speedFill');
+const flashEl     = document.getElementById('collision-flash');
+
+function updateHUD() {
+  const kph = Math.abs(speed) * 320;
+  speedNumEl.textContent  = kph.toFixed(0);
+  distNumEl.textContent   = (totalDist * 3.2).toFixed(0) + 'm';
+  speedFillEl.style.width = (Math.abs(speed) / MAX_SPEED * 100) + '%';
+
+  if (collisionFlashTimer > 0) {
+    collisionFlashTimer--;
+    flashEl.style.opacity = (collisionFlashTimer / 8) * 0.5;
+  } else {
+    flashEl.style.opacity = 0;
+  }
+
+  // Tail lights brighten when braking
+  const braking = keys['KeyS'] || keys['ArrowDown'];
+  tailGlow.intensity = braking ? 14 : 4;
+}
+
+// ─────────────────────────────────────────────
+//  LOAD USDZ ASSETS
+// ─────────────────────────────────────────────
+let assetsTotal  = 4;
+let assetsLoaded = 0;
+
+const loadFill = document.getElementById('loadFill');
+const loadText = document.getElementById('loadText');
+const overlay  = document.getElementById('overlay');
+const hud      = document.getElementById('hud');
+
+function onAssetLoaded(name) {
+  assetsLoaded++;
+  loadFill.style.width = (assetsLoaded / assetsTotal * 100) + '%';
+  loadText.textContent = `loaded: ${name}`;
+  if (assetsLoaded >= assetsTotal) {
+    setTimeout(() => {
+      overlay.style.opacity = '0';
+      setTimeout(() => { overlay.style.display = 'none'; }, 800);
+      hud.classList.add('visible');
+    }, 400);
+  }
+}
+
+function normaliseModel(obj, targetSize) {
+  const box  = new THREE.Box3().setFromObject(obj);
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const scale = targetSize / maxDim;
+  obj.scale.setScalar(scale);
+
+  // Re-calculate and re-center
+  const box2 = new THREE.Box3().setFromObject(obj);
+  const ctr   = box2.getCenter(new THREE.Vector3());
+  obj.position.sub(ctr);
+
+  const box3  = new THREE.Box3().setFromObject(obj);
+  obj.position.y -= box3.min.y; // sit on ground
+  return obj;
+}
+
+const usdzLoader = new USDZLoader();
+
+// — Car —
+usdzLoader.load('./assets/Small_price_car.usdz',
+  (obj) => {
+    normaliseModel(obj, 4);
+    carGroup.add(obj);
+    fallbackCar.visible = false;
+    onAssetLoaded('car');
+  },
+  null,
+  () => {
+    console.warn('Car USDZ failed – using fallback');
+    onAssetLoaded('car (fallback)');
+  }
+);
+
+// — Road tile —
+let roadUsdzTemplate = null;
+usdzLoader.load('./assets/Street_road.usdz',
+  (obj) => {
+    normaliseModel(obj, ROAD_LENGTH);
+    roadUsdzTemplate = obj;
+    onAssetLoaded('road');
+  },
+  null,
+  () => {
+    console.warn('Road USDZ failed – using procedural road');
+    onAssetLoaded('road (fallback)');
+  }
+);
+
+// — Buildings —
+const buildingTemplates = [];
+
+usdzLoader.load('./assets/Old_Japanese_Store.usdz',
+  (obj) => {
+    normaliseModel(obj, 8);
+    buildingTemplates.push(obj);
+    onAssetLoaded('Japanese store');
+  },
+  null,
+  () => {
+    console.warn('Japanese store USDZ failed – using fallback');
+    onAssetLoaded('store (fallback)');
+  }
+);
+
+usdzLoader.load('./assets/Old_Concete_Building_Pack__Lowpoly.usdz',
+  (obj) => {
+    normaliseModel(obj, 10);
+    buildingTemplates.push(obj);
+    onAssetLoaded('concrete building');
+  },
+  null,
+  () => {
+    console.warn('Concrete building USDZ failed – using fallback');
+    onAssetLoaded('building (fallback)');
+  }
+);
+
+// Upgrade building pool with loaded USDZ templates
+function upgradeBuildingPool() {
+  if (buildingTemplates.length === 0) return;
+  // Clear pool, replace with USDZ clones
+  buildingPool.forEach((b, i) => {
+    if (b.visible) return; // don't replace active ones
+    scene.remove(b);
+
+    const src = buildingTemplates[i % buildingTemplates.length].clone();
+    src.visible = false;
+    src.userData.bbox = new THREE.Box3();
+    buildingPool[i] = src;
+    scene.add(src);
+  });
+}
+
+// ─────────────────────────────────────────────
+//  MAIN LOOP
+// ─────────────────────────────────────────────
+let lastTime = performance.now();
+
+// Seed road before first frame
+seedWorld();
+camCurrent.set(0, 3.8, 9.5);
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const now = performance.now();
+  const rawDt = (now - lastTime) / 16.667; // normalised to 60fps
+  lastTime = now;
+  const dt = Math.min(rawDt, 3); // clamp to avoid spiral-of-death
+
+  updateCar(dt);
+  doCollisions();
+  updateWorld();
+  updateCamera(dt);
+  updateHUD();
+
+  // Lazy upgrade after templates loaded
+  if (buildingTemplates.length > 0 && buildingPool.every(b => b.visible === false || b.children.length > 0)) {
+    // already upgraded check is implicit – clone sources have children
+  }
+
+  composer.render();
+}
+
+animate();
+
+// ─────────────────────────────────────────────
+//  RESIZE
+// ─────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+  bloom.resolution.set(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
